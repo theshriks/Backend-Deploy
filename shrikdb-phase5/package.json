@@ -1,0 +1,44 @@
+{
+  "name": "shrikdb-phase5",
+  "version": "1.0.0",
+  "description": "ShrikDB Phase 5 - Performance, Storage & Competitive Benchmarking",
+  "main": "dist/index.js",
+  "bin": {
+    "shrikdb": "./dist/cli/shrikdb.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "cli": "ts-node cli/shrikdb.ts",
+    "wal:inspect": "ts-node cli/shrikdb.ts wal inspect",
+    "wal:verify": "ts-node cli/shrikdb.ts wal verify",
+    "wal:stats": "ts-node cli/shrikdb.ts wal stats",
+    "snapshot:create": "ts-node cli/shrikdb.ts snapshot create",
+    "snapshot:list": "ts-node cli/shrikdb.ts snapshot list",
+    "benchmark:run": "ts-node cli/shrikdb.ts benchmark run",
+    "benchmark:list": "ts-node cli/shrikdb.ts benchmark list",
+    "metrics": "ts-node cli/shrikdb.ts metrics",
+    "verify": "ts-node cli/shrikdb.ts verify",
+    "verify:full": "ts-node verification/verify-all.ts",
+    "test": "ts-node test/run-tests.ts"
+  },
+  "keywords": [
+    "database",
+    "wal",
+    "event-sourcing",
+    "benchmark"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^25.0.9",
+    "@types/uuid": "^10.0.0",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.2",
+    "fs-extra": "^11.3.3",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "uuid": "^11.1.0",
+    "zod": "^4.3.5"
+  }
+}
