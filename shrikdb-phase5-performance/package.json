@@ -1,0 +1,32 @@
+{
+  "name": "shrikdb-phase5-performance",
+  "version": "1.0.0",
+  "description": "ShrikDB Phase 5 - High Performance WAL Engine",
+  "main": "dist/index.js",
+  "bin": {
+    "shrikdb-perf": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npx ts-node quick-test.ts",
+    "quick-test": "npx ts-node quick-test.ts",
+    "benchmark": "npx ts-node cli.ts benchmark",
+    "verify": "npx ts-node run-verification.ts",
+    "clean": "rm -rf dist data"
+  },
+  "keywords": [
+    "database",
+    "wal",
+    "event-sourcing",
+    "performance"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@types/node": "^25.0.9",
+    "@types/uuid": "^10.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "uuid": "^11.1.0"
+  }
+}
