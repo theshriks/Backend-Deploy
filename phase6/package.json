@@ -1,0 +1,19 @@
+{
+  "name": "shrikdb-phase6-truth-bridge",
+  "version": "1.0.0",
+  "description": "Phase 6.2 - Truth Bridge: Production-grade bridge connecting Velocity Engine to ShrikDB WAL",
+  "main": "index.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "npx ts-node cli.ts start",
+    "verify": "npx ts-node verification/run-verification.ts",
+    "test": "npx ts-node verification/run-verification.ts"
+  },
+  "dependencies": {
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "ts-node": "^10.9.0"
+  }
+}
