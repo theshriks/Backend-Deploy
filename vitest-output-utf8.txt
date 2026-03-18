@@ -1,0 +1,143 @@
+﻿
+[1m[46m RUN [49m[22m [36mv4.1.0 [39m[90mC:/Users/HP/Downloads/themodelforge/backend[39m
+
+ [31m❯[39m src/tests/jobs.test.ts [2m([22m[2m8 tests[22m[2m | [22m[33m8 skipped[39m[2m)[22m[32m 6[2mms[22m[39m
+     [2m[90m↓[39m[22m returns 400 on missing required fields
+     [2m[90m↓[39m[22m returns 404 on non-existent project
+     [2m[90m↓[39m[22m returns 401 without auth token
+     [2m[90m↓[39m[22m returns 404 for non-existent job
+     [2m[90m↓[39m[22m returns 401 without auth token
+     [2m[90m↓[39m[22m GET /projects returns array of user projects
+     [2m[90m↓[39m[22m POST /projects returns 400 on empty name
+     [2m[90m↓[39m[22m POST /projects creates project with valid name
+ [31m❯[39m src/tests/internal.test.ts [2m([22m[2m11 tests[22m[2m | [22m[33m11 skipped[39m[2m)[22m[32m 6[2mms[22m[39m
+     [2m[90m↓[39m[22m returns 401 when X-Internal-Secret header missing
+     [2m[90m↓[39m[22m returns 401 when X-Internal-Secret is wrong
+     [2m[90m↓[39m[22m returns 404 for non-existent job_id
+     [2m[90m↓[39m[22m returns 400 on invalid body
+     [2m[90m↓[39m[22m completes job successfully — 200 with modelId
+     [2m[90m↓[39m[22m idempotent — second call returns 200 with terminal state note
+     [2m[90m↓[39m[22m marks job as FAILED with error message
+     [2m[90m↓[39m[22m returns 401 without secret
+     [2m[90m↓[39m[22m broadcasts training.step and updates job progress
+     [2m[90m↓[39m[22m handles non-training events without error
+     [2m[90m↓[39m[22m returns 400 on missing event_type
+ [31m❯[39m src/tests/auth.test.ts [2m([22m[2m16 tests[22m[2m | [22m[33m16 skipped[39m[2m)[22m[32m 6[2mms[22m[39m
+     [2m[90m↓[39m[22m returns 201 with tokens and user
+     [2m[90m↓[39m[22m returns 409 on duplicate email
+     [2m[90m↓[39m[22m returns 400 on invalid email
+     [2m[90m↓[39m[22m returns 400 on short password (< 8 chars)
+     [2m[90m↓[39m[22m returns 400 on short name (< 2 chars)
+     [2m[90m↓[39m[22m returns 400 on missing fields
+     [2m[90m↓[39m[22m returns 200 with tokens on correct credentials
+     [2m[90m↓[39m[22m returns 401 on wrong password
+     [2m[90m↓[39m[22m returns 401 on non-existent email — same error message as wrong password
+     [2m[90m↓[39m[22m returns 400 on missing password
+     [2m[90m↓[39m[22m returns 200 with new accessToken
+     [2m[90m↓[39m[22m returns 401 on reused refresh token (rotation)
+     [2m[90m↓[39m[22m returns 401 on invalid token string
+     [2m[90m↓[39m[22m returns 400 on missing refreshToken field
+     [2m[90m↓[39m[22m returns 401 on missing Authorization header
+     [2m[90m↓[39m[22m returns 401 on invalid Bearer token
+node.exe : 
+At line:1 char:1
++ & "C:\Program Files\nodejs/node.exe" 
+"C:\Program Files\nodejs/node_mo ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: 
+    (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommand 
+   Error
+ 
+[31m⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Suites 3 
+[49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+
+[41m[1m FAIL [22m[49m 
+src/tests/auth.test.ts[2m [ 
+src/tests/auth.test.ts ][22m
+[31m[1mTypeError[22m: 
+shrikdbClient.setCredentials is not a 
+function[39m
+[36m [2m❯[22m StateStore.initialize 
+src/lib/state-store.ts:[2m84:21[22m[39m
+    [90m 82|[39m     [35mif[39m 
+(envClientId [33m&&[39m envClientKey) {
+    [90m 83|[39m       [90m// Existing 
+project — use saved credentials[39m
+    [90m 84|[39m       
+shrikdbClient.setCredentials(envClientId, 
+envClientKey, projectI…
+    [90m   |[39m                     
+[31m^[39m
+    [90m 85|[39m       logger.info({ 
+projectId }, 'Using existing ShrikDB 
+credentials f…
+    [90m 86|[39m     } [35melse[39m {
+[90m [2m❯[22m 
+src/tests/auth.test.ts:[2m14:20[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/3]⎯[22m
+[39m
+
+[41m[1m FAIL [22m[49m 
+src/tests/internal.test.ts[2m [ 
+src/tests/internal.test.ts ][22m
+[31m[1mTypeError[22m: 
+shrikdbClient.setCredentials is not a 
+function[39m
+[36m [2m❯[22m StateStore.initialize 
+src/lib/state-store.ts:[2m84:21[22m[39m
+    [90m 82|[39m     [35mif[39m 
+(envClientId [33m&&[39m envClientKey) {
+    [90m 83|[39m       [90m// Existing 
+project — use saved credentials[39m
+    [90m 84|[39m       
+shrikdbClient.setCredentials(envClientId, 
+envClientKey, projectI…
+    [90m   |[39m                     
+[31m^[39m
+    [90m 85|[39m       logger.info({ 
+projectId }, 'Using existing ShrikDB 
+credentials f…
+    [90m 86|[39m     } [35melse[39m {
+[90m [2m❯[22m src/tests/internal.test.ts:
+[2m14:20[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/3]⎯[22m
+[39m
+
+[41m[1m FAIL [22m[49m 
+src/tests/jobs.test.ts[2m [ 
+src/tests/jobs.test.ts ][22m
+[31m[1mTypeError[22m: 
+shrikdbClient.setCredentials is not a 
+function[39m
+[36m [2m❯[22m StateStore.initialize 
+src/lib/state-store.ts:[2m84:21[22m[39m
+    [90m 82|[39m     [35mif[39m 
+(envClientId [33m&&[39m envClientKey) {
+    [90m 83|[39m       [90m// Existing 
+project — use saved credentials[39m
+    [90m 84|[39m       
+shrikdbClient.setCredentials(envClientId, 
+envClientKey, projectI…
+    [90m   |[39m                     
+[31m^[39m
+    [90m 85|[39m       logger.info({ 
+projectId }, 'Using existing ShrikDB 
+credentials f…
+    [90m 86|[39m     } [35melse[39m {
+[90m [2m❯[22m 
+src/tests/jobs.test.ts:[2m14:20[22m[39m
+
+[31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/3]⎯[22m
+[39m
+
+
+[2m Test Files [22m [1m[31m3 failed[39m[22m[90m (3)[39m
+[2m      Tests [22m [33m35 skipped[39m[90m (35)[39m
+[2m   Start at [22m 02:58:10
+[2m   Duration [22m 1.71s[2m (transform 770ms, setup 112ms, import 4.03s, tests 17ms, environment 0ms)[22m
+
+
