@@ -1,26 +1,21 @@
 // ── ShrikDB — Event Store + WebSocket Broadcaster ────────────────────────────
 //
-// ARCHITECTURE:
-// This file has 3 responsibilities:
+// ARCHITECTURE (Post-Migration):
 //   1. WebSocket server: broadcasts events to React clients per jobId
 //   2. emitEvent(): sends events to ShrikDB service for WAL logging (when connected)
-//   3. handleShrikDBEvent(): processes inbound events from ShrikDB → updates DB → broadcasts
+//   3. handleShrikDBEvent(): processes inbound events from ShrikDB → updates StateStore → broadcasts
 //
-// WAL Engine & Velocity Engine are NOT yet integrated.
-// When teammates connect ShrikDB, they should:
-//   - Set SHRIKDB_URL in .env (e.g. "http://localhost:8080")
-//   - emitEvent() will POST to {SHRIKDB_URL}/events automatically
-//   - handleShrikDBEvent() is ready to receive inbound events
+// The StateStore (state-store.ts) is the source of truth for all reads.
+// ShrikDB is the persistence layer — all writes go through the ShrikDB client.
 //
 // CLOUDFLARE PRODUCTION: WebSockets are BLOCKED by default
 // CF Dashboard → theshriks.space → Network → WebSockets → ON
 // Always use wss:// in production, never ws://
-// ─────────────────────────────────────────────────────────────────────────────
 
 import { WebSocketServer, WebSocket } from 'ws';
 import type { Server } from 'http';
-import prisma from './prisma';
-import logger from './logger';
+import { stateStore } from './state-store';
+import { logger } from './logger';
 
 // ── Event Types ──────────────────────────────────────────────────────────────
 
@@ -44,7 +39,7 @@ export interface ShrikDBEvent {
 
 // ── SHRIKDB_URL Check ────────────────────────────────────────────────────────
 
-const SHRIKDB_URL = process.env.SHRIKDB_URL ?? '';
+const SHRIKDB_URL = process.env['SHRIKDB_URL'] ?? '';
 
 if (!SHRIKDB_URL) {
   logger.warn('SHRIKDB_URL is not set — emitEvent() will only broadcast locally via WebSocket. WAL logging disabled.');
@@ -77,11 +72,9 @@ export function initShrikDBWebSocket(server: Server): WebSocketServer {
     jobClients.get(jobId)!.add(ws);
     logger.info({ jobId }, 'WS client connected');
 
-    // ── Ping/Pong with real 10s timeout ──────────────────────────────────
     let pongTimer: ReturnType<typeof setTimeout> | null = null;
 
     const pingInterval = setInterval(() => {
-      // Set a 10s deadline for pong response
       pongTimer = setTimeout(() => {
         logger.warn({ jobId }, 'WS client pong timeout — terminating');
         ws.terminate();
@@ -123,10 +116,7 @@ export function initShrikDBWebSocket(server: Server): WebSocketServer {
 
 export function broadcastToJob(jobId: string, event: Record<string, unknown>): void {
   const clients = jobClients.get(jobId);
-  if (!clients || clients.size === 0) {
-    // Silent skip — no connected clients for this jobId
-    return;
-  }
+  if (!clients || clients.size === 0) return;
 
   const payload = JSON.stringify(event);
   for (const ws of clients) {
@@ -141,15 +131,6 @@ export function getConnectedClientCount(jobId: string): number {
 }
 
 // ── Emit Event (to ShrikDB WAL + local broadcast) ────────────────────────────
-//
-// Call this from route handlers and workers to:
-//   1. Send the event to ShrikDB service for WAL logging (if SHRIKDB_URL set)
-//   2. Broadcast the event to any connected WebSocket clients
-//
-// This is fire-and-forget for WAL — a WAL failure must never block the caller.
-//
-// TEAMMATES: When ShrikDB is deployed, this function will automatically
-// POST events to it. No changes needed in calling code.
 
 export async function emitEvent(
   eventType: ShrikDBEventType,
@@ -161,20 +142,18 @@ export async function emitEvent(
     ...payload,
   };
 
-  // 1. Broadcast locally to WebSocket clients (if jobId present)
   const jobId = typeof payload['jobId'] === 'string' ? payload['jobId'] : null;
   if (jobId) {
     broadcastToJob(jobId, event);
   }
 
-  // 2. Send to ShrikDB service for WAL logging (fire-and-forget)
   if (SHRIKDB_URL) {
     try {
       const response = await fetch(`${SHRIKDB_URL}/events`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(event),
-        signal: AbortSignal.timeout(5_000), // 5s timeout — never block caller
+        signal: AbortSignal.timeout(5_000),
       });
 
       if (!response.ok) {
@@ -184,7 +163,6 @@ export async function emitEvent(
         );
       }
     } catch (err: unknown) {
-      // Fire-and-forget: WAL failure must never crash the application
       logger.warn(
         { err, eventType },
         'ShrikDB WAL unreachable — event broadcast locally only',
@@ -194,15 +172,8 @@ export async function emitEvent(
 }
 
 // ── Handle Inbound ShrikDB Events ────────────────────────────────────────────
-//
-// This function processes events coming FROM ShrikDB (or from workers directly).
-// It updates the DB and broadcasts to connected WebSocket clients.
-//
-// EDGE CASES:
-// - Nonexistent jobId/modelId → log warning, skip DB update, still broadcast
-// - Null checkpointPath → use fallback, still set COMPLETED
-// - Out-of-order events → no-op if job already in terminal state (COMPLETED/FAILED)
-// - Unknown event type → log, skip
+// Updates in-memory StateStore and broadcasts to WebSocket clients.
+// Terminal state guards prevent processing stale events.
 
 export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
   const eventType = event.event_type;
@@ -212,33 +183,30 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
       const jobId = event['jobId'] as string | undefined;
       if (!jobId) { logger.warn({ event }, 'training.step missing jobId — skipping'); return; }
 
-      const job = await prisma.job.findUnique({ where: { id: jobId }, select: { status: true } })
-        .catch(() => null);
-
+      const job = stateStore.getJobById(jobId);
       if (!job) {
-        logger.warn({ jobId }, 'training.step: job not found in DB — broadcasting only');
+        logger.warn({ jobId }, 'training.step: job not found — broadcasting only');
         broadcastToJob(jobId, event);
         return;
       }
 
-      // Ignore stale events if job already terminal
       if (job.status === 'COMPLETED' || job.status === 'FAILED') {
         logger.warn({ jobId, currentStatus: job.status }, 'training.step arrived for terminal job — ignoring');
         return;
       }
 
-      await prisma.job.update({
-        where: { id: jobId },
-        data: {
-          status: 'RUNNING',
-          progress: typeof event['step'] === 'number' && typeof event['totalSteps'] === 'number' && event['totalSteps'] > 0
-            ? Math.round(((event['step'] as number) / (event['totalSteps'] as number)) * 100)
-            : undefined,
-          currentLoss: typeof event['loss'] === 'number' ? event['loss'] as number : undefined,
-          currentStep: typeof event['step'] === 'number' ? event['step'] as number : undefined,
-          totalSteps: typeof event['totalSteps'] === 'number' ? event['totalSteps'] as number : undefined,
-        },
-      }).catch((err: unknown) => logger.error({ err, jobId }, 'training.step: DB update failed'));
+      await stateStore.updateJobStatus(jobId, { status: 'RUNNING' });
+
+      const progress = typeof event['step'] === 'number' && typeof event['totalSteps'] === 'number' && (event['totalSteps'] as number) > 0
+        ? Math.round(((event['step'] as number) / (event['totalSteps'] as number)) * 100)
+        : undefined;
+
+      await stateStore.updateJobProgress(jobId, {
+        progress: progress ?? 0,
+        currentLoss: typeof event['loss'] === 'number' ? event['loss'] as number : undefined,
+        currentStep: typeof event['step'] === 'number' ? event['step'] as number : undefined,
+        totalSteps: typeof event['totalSteps'] === 'number' ? event['totalSteps'] as number : undefined,
+      });
 
       broadcastToJob(jobId, event);
       break;
@@ -248,11 +216,9 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
       const jobId = event['jobId'] as string | undefined;
       if (!jobId) { logger.warn({ event }, 'training.completed missing jobId — skipping'); return; }
 
-      const job = await prisma.job.findUnique({ where: { id: jobId }, select: { status: true } })
-        .catch(() => null);
-
+      const job = stateStore.getJobById(jobId);
       if (!job) {
-        logger.warn({ jobId }, 'training.completed: job not found in DB — broadcasting only');
+        logger.warn({ jobId }, 'training.completed: job not found — broadcasting only');
         broadcastToJob(jobId, event);
         return;
       }
@@ -262,22 +228,18 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
         return;
       }
 
-      // Guard: null checkpointPath
       let checkpointPath = event['checkpointPath'] as string | null | undefined;
       if (!checkpointPath) {
-        logger.warn({ jobId }, 'training.completed: checkpointPath is null/undefined — using fallback');
+        logger.warn({ jobId }, 'training.completed: checkpointPath is null — using fallback');
         checkpointPath = `checkpoints/${jobId}`;
       }
 
-      await prisma.job.update({
-        where: { id: jobId },
-        data: {
-          status: 'COMPLETED',
-          progress: 100,
-          checkpointPath,
-          completedAt: new Date(),
-        },
-      }).catch((err: unknown) => logger.error({ err, jobId }, 'training.completed: DB update failed'));
+      await stateStore.updateJobStatus(jobId, {
+        status: 'COMPLETED',
+        checkpointPath,
+        completedAt: new Date().toISOString(),
+      });
+      await stateStore.updateJobProgress(jobId, { progress: 100 });
 
       broadcastToJob(jobId, event);
       break;
@@ -287,11 +249,9 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
       const jobId = event['jobId'] as string | undefined;
       if (!jobId) { logger.warn({ event }, 'training.failed missing jobId — skipping'); return; }
 
-      const job = await prisma.job.findUnique({ where: { id: jobId }, select: { status: true } })
-        .catch(() => null);
-
+      const job = stateStore.getJobById(jobId);
       if (!job) {
-        logger.warn({ jobId }, 'training.failed: job not found in DB — broadcasting only');
+        logger.warn({ jobId }, 'training.failed: job not found — broadcasting only');
         broadcastToJob(jobId, event);
         return;
       }
@@ -302,15 +262,11 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
       }
 
       const errorMessage = typeof event['error'] === 'string' ? event['error'] as string : 'Unknown error';
-
-      await prisma.job.update({
-        where: { id: jobId },
-        data: {
-          status: 'FAILED',
-          errorMessage,
-          completedAt: new Date(),
-        },
-      }).catch((err: unknown) => logger.error({ err, jobId }, 'training.failed: DB update failed'));
+      await stateStore.updateJobStatus(jobId, {
+        status: 'FAILED',
+        errorMessage,
+        completedAt: new Date().toISOString(),
+      });
 
       broadcastToJob(jobId, event);
       break;
@@ -320,25 +276,20 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
       const modelId = event['modelId'] as string | undefined;
       if (!modelId) { logger.warn({ event }, 'eval.completed missing modelId — skipping'); return; }
 
-      const model = await prisma.model.findUnique({ where: { id: modelId }, select: { id: true } })
-        .catch(() => null);
-
+      const model = stateStore.getModelById(modelId);
       if (!model) {
-        logger.warn({ modelId }, 'eval.completed: model not found in DB — skipping');
+        logger.warn({ modelId }, 'eval.completed: model not found — skipping');
         return;
       }
 
       const benchmarks = event['allBenchmarks'] as Record<string, number> | undefined;
-
-      await prisma.model.update({
-        where: { id: modelId },
-        data: {
+      if (benchmarks) {
+        await stateStore.updateModelStatus(modelId, {
           status: 'EVALUATED',
-          benchmarks: benchmarks ?? undefined,
-        },
-      }).catch((err: unknown) => logger.error({ err, modelId }, 'eval.completed: DB update failed'));
+          benchmarks,
+        });
+      }
 
-      // Broadcast on the model's jobId if available
       const jobId = event['jobId'] as string | undefined;
       if (jobId) broadcastToJob(jobId, event);
       break;
@@ -348,34 +299,29 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
       const modelId = event['modelId'] as string | undefined;
       if (!modelId) { logger.warn({ event }, 'deploy.live missing modelId — skipping'); return; }
 
-      const model = await prisma.model.findUnique({ where: { id: modelId }, select: { id: true } })
-        .catch(() => null);
-
+      const model = stateStore.getModelById(modelId);
       if (!model) {
-        logger.warn({ modelId }, 'deploy.live: model not found in DB — skipping');
+        logger.warn({ modelId }, 'deploy.live: model not found — skipping');
         return;
       }
 
-      await prisma.model.update({
-        where: { id: modelId },
-        data: {
-          status: 'DEPLOYED',
-          deployedAt: new Date(),
-        },
-      }).catch((err: unknown) => logger.error({ err, modelId }, 'deploy.live: DB update failed'));
+      await stateStore.updateModelStatus(modelId, {
+        status: 'DEPLOYED',
+        deployedAt: new Date().toISOString(),
+      });
 
       const jobId = event['jobId'] as string | undefined;
       if (jobId) broadcastToJob(jobId, event);
       break;
     }
 
-    // All other event types: log only, no DB update needed
+    // All other event types: log only
     case 'eval.result':
     case 'safety.violation':
     case 'redteam.completed':
     case 'model.version.created':
     case 'compliance.generated': {
-      logger.info({ eventType }, 'ShrikDB event received (log-only, no DB update)');
+      logger.info({ eventType }, 'ShrikDB event received (log-only)');
       const jobId = event['jobId'] as string | undefined;
       if (jobId) broadcastToJob(jobId, event);
       break;
@@ -388,19 +334,12 @@ export async function handleShrikDBEvent(event: ShrikDBEvent): Promise<void> {
 }
 
 // ── Test Helper ──────────────────────────────────────────────────────────────
-//
-// Run this at server startup (dev only) to verify ShrikDB is wired correctly.
-// It emits a mock training.step event and logs the result.
-
 export async function testEventEmit(): Promise<void> {
   const testEvent: Record<string, unknown> = {
     jobId: 'test-job-1',
     projectId: 'test-project-1',
-    step: 42,
-    totalSteps: 1000,
-    loss: 0.342,
-    lr: 0.0001,
-    gpuUtil: 87.5,
+    step: 42, totalSteps: 1000,
+    loss: 0.342, lr: 0.0001, gpuUtil: 87.5,
   };
 
   logger.info({ payload: testEvent }, '[shrikdb] Test event emitted: training.step');

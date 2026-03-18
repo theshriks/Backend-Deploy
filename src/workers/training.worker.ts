@@ -1,14 +1,14 @@
 import { Worker, type Job, type ConnectionOptions } from 'bullmq';
 import redisConnection from '../lib/redis';
-import prisma from '../lib/prisma';
+import { stateStore } from '../lib/state-store';
 import { broadcastToJob } from '../lib/shrikdb';
-import logger from '../lib/logger';
+import { logger } from '../lib/logger';
 
-const PYTHON_SERVICE_URL = process.env.PYTHON_SERVICE_URL ?? '';
+const PYTHON_SERVICE_URL = process.env['PYTHON_SERVICE_URL'] ?? '';
 const POLL_INTERVAL_MS = 5_000;
 const FINETUNE_TRIGGER_TIMEOUT_MS = 30_000;
 const STATUS_POLL_TIMEOUT_MS = 30_000;
-const MAX_POLL_ATTEMPTS = 2160; // 5s × 2160 = ~3 hours max training time
+const MAX_POLL_ATTEMPTS = 2160; // 5s × 2160 = ~3 hours max
 
 interface TrainingJobData {
   jobId: string;
@@ -35,7 +35,6 @@ interface NemoPollResponse {
   gpuUtil: number;
 }
 
-// ── Typed fetch helpers with timeout ────────────────────────────────────────
 async function fetchWithTimeout(
   url: string,
   options: RequestInit,
@@ -70,7 +69,6 @@ async function triggerNemoJob(
   payload: Record<string, unknown>,
 ): Promise<NemoStartResponse> {
   const route = getPythonEndpoint(method);
-
   const res = await fetchWithTimeout(
     `${PYTHON_SERVICE_URL}${route}`,
     {
@@ -80,10 +78,7 @@ async function triggerNemoJob(
     },
     FINETUNE_TRIGGER_TIMEOUT_MS,
   );
-
-  if (!res.ok) {
-    throw new Error(`Python service returned ${res.status} on ${route}`);
-  }
+  if (!res.ok) throw new Error(`Python service returned ${res.status} on ${route}`);
   return res.json() as Promise<NemoStartResponse>;
 }
 
@@ -93,10 +88,7 @@ async function pollNemoStatus(nemoJobId: string): Promise<NemoPollResponse> {
     { method: 'GET' },
     STATUS_POLL_TIMEOUT_MS,
   );
-
-  if (!res.ok) {
-    throw new Error(`Python service returned ${res.status} polling job ${nemoJobId}`);
-  }
+  if (!res.ok) throw new Error(`Python service returned ${res.status} polling job ${nemoJobId}`);
   return res.json() as Promise<NemoPollResponse>;
 }
 
@@ -105,71 +97,57 @@ async function processTrainingJob(job: Job<TrainingJobData>): Promise<void> {
   const { jobId, projectId, datasetId, modelName, method, hyperparams } = job.data;
   logger.info({ jobId, modelName, method, attempt: job.attemptsMade + 1 }, 'Training worker picked up job');
 
-  // STEP 1: Mark RUNNING in DB — store startedAt for duration calc
+  // STEP 1: Mark RUNNING
   const jobStartTime = new Date();
-  await prisma.job.update({
-    where: { id: jobId },
-    data: { status: 'RUNNING', startedAt: jobStartTime, errorMessage: null },
+  await stateStore.updateJobStatus(jobId, {
+    status: 'RUNNING',
+    startedAt: jobStartTime.toISOString(),
+    errorMessage: undefined,
   });
 
   broadcastToJob(jobId, {
     event_type: 'training.step',
-    jobId,
-    projectId,
-    step: 0,
-    totalSteps: 0,
-    loss: 0,
-    lr: 0,
-    gpuUtil: 0,
+    jobId, projectId,
+    step: 0, totalSteps: 0, loss: 0, lr: 0, gpuUtil: 0,
     timestamp: new Date().toISOString(),
   });
 
-  // STEP 2: Validate method before calling Python — unknown/undefined = permanent fail (no retry)
+  // STEP 2: Validate method
   if (!method) {
     const msg = 'Job missing method field — cannot route to Python';
     logger.error({ jobId }, msg);
     await markJobFailed(jobId, projectId, msg);
-    return; // Do NOT throw — returning prevents BullMQ retry
+    return;
   }
 
   try {
-    getPythonEndpoint(method); // validate method is routable
+    getPythonEndpoint(method);
   } catch (routeErr) {
     const msg = routeErr instanceof Error ? routeErr.message : String(routeErr);
     logger.error({ jobId, method }, msg);
     await markJobFailed(jobId, projectId, msg);
-    return; // Do NOT throw — permanent fail, no retry
+    return;
   }
 
   // Trigger NeMo training
   let nemoResponse: NemoStartResponse;
   try {
-    nemoResponse = await triggerNemoJob(method, {
-      jobId,
-      datasetId,
-      modelName,
-      hyperparams,
-    });
+    nemoResponse = await triggerNemoJob(method, { jobId, datasetId, modelName, hyperparams });
   } catch (err) {
     logger.error({ err, jobId }, 'Failed to trigger NeMo training');
-    // Set back to QUEUED so BullMQ retry finds correct status
-    // Only mark permanently FAILED after all retries exhaust (handled by worker.on('failed'))
-    await prisma.job.update({
-      where: { id: jobId },
-      data: { status: 'QUEUED', errorMessage: `Attempt ${job.attemptsMade + 1} failed: ${String(err)}` },
-    }).catch((dbErr: unknown) => logger.error({ dbErr, jobId }, 'Failed to reset job to QUEUED'));
-    throw err; // BullMQ will retry per queue config
+    await stateStore.updateJobStatus(jobId, {
+      status: 'QUEUED',
+      errorMessage: `Attempt ${job.attemptsMade + 1} failed: ${String(err)}`,
+    });
+    throw err; // BullMQ will retry
   }
 
   const nemoJobId = nemoResponse.jobId;
   logger.info({ jobId, nemoJobId }, 'NeMo training triggered');
 
-  await prisma.job.update({
-    where: { id: jobId },
-    data: { nemoJobId },
-  });
+  await stateStore.updateJobStatus(jobId, { status: 'RUNNING', nemoJobId });
 
-  // STEP 3: Poll NeMo status every 5s until done or failed
+  // STEP 3: Poll NeMo status
   let lastTimestamp = 0;
   let pollAttempts = 0;
 
@@ -182,12 +160,10 @@ async function processTrainingJob(job: Job<TrainingJobData>): Promise<void> {
       pollData = await pollNemoStatus(nemoJobId);
     } catch (err) {
       logger.warn({ err, jobId, nemoJobId }, 'Poll failed — will retry next interval');
-      continue; // network hicup — keep polling
+      continue;
     }
 
     const now = Date.now();
-
-    // Stale event guard (permanent memory anchor — use timestamp)
     if (now <= lastTimestamp) continue;
     lastTimestamp = now;
 
@@ -195,93 +171,67 @@ async function processTrainingJob(job: Job<TrainingJobData>): Promise<void> {
     const totalSteps = pollData.totalSteps;
     const progress = totalSteps > 0 ? Math.round((step / totalSteps) * 100) : 0;
 
-    // STEP 4: Update DB + broadcast ShrikDB event on every poll
-    await prisma.job.update({
-      where: { id: jobId },
-      data: {
-        currentStep: step,
-        totalSteps,
-        progress,
-        currentLoss: pollData.loss,
-      },
+    await stateStore.updateJobProgress(jobId, {
+      progress,
+      currentStep: step,
+      totalSteps,
+      currentLoss: pollData.loss,
     });
 
     broadcastToJob(jobId, {
       event_type: 'training.step',
-      jobId,
-      projectId,
-      step,
-      totalSteps,
-      loss: pollData.loss,
-      lr: pollData.lr,
-      gpuUtil: pollData.gpuUtil,
+      jobId, projectId, step, totalSteps,
+      loss: pollData.loss, lr: pollData.lr, gpuUtil: pollData.gpuUtil,
       timestamp: new Date().toISOString(),
     });
 
-    if (pollData.status === 'completed') {
-      break;
-    }
+    if (pollData.status === 'completed') break;
     if (pollData.status === 'failed') {
       await markJobFailed(jobId, projectId, 'NeMo reported training failure');
       throw new Error('NeMo training failed');
     }
   }
 
-  // If we exit the loop without completion, the job timed out
   if (pollAttempts >= MAX_POLL_ATTEMPTS) {
     await markJobFailed(jobId, projectId, `Training exceeded max duration (~${Math.round(MAX_POLL_ATTEMPTS * POLL_INTERVAL_MS / 60_000)}min)`);
     throw new Error('Training timed out');
   }
 
-  // STEP 5: Mark COMPLETED + store checkpoint path
+  // STEP 5: Mark COMPLETED
   const checkpointPath = nemoResponse.checkpointDir ?? `checkpoints/${nemoJobId}`;
   const finalPoll = await pollNemoStatus(nemoJobId).catch(() => null);
   const finalLoss = finalPoll?.loss ?? 0;
   const durationMin = Math.round((Date.now() - jobStartTime.getTime()) / 60_000);
   const gpuHours = parseFloat((durationMin / 60).toFixed(2));
 
-  await prisma.job.update({
-    where: { id: jobId },
-    data: {
-      status: 'COMPLETED',
-      progress: 100,
-      checkpointPath,
-      completedAt: new Date(),
-    },
+  await stateStore.updateJobStatus(jobId, {
+    status: 'COMPLETED',
+    checkpointPath,
+    completedAt: new Date().toISOString(),
   });
+  await stateStore.updateJobProgress(jobId, { progress: 100 });
 
   // Create Model record
-  await prisma.model.create({
-    data: {
-      projectId,
-      jobId,
-      name: job.data.modelName,
-      baseModel: method,
-      checkpointPath,
-      status: 'TRAINED',
-    },
+  await stateStore.createModel({
+    projectId,
+    jobId,
+    name: job.data.modelName,
+    baseModel: method,
+    checkpointPath,
   });
 
-  // Create UsageRecord for billing — uses actual duration, not estimate
-  const jobRecord = await prisma.job.findUnique({
-    where: { id: jobId },
-    select: { estimatedCost: true },
-  }).catch(() => null);
-
-  await prisma.usageRecord.create({
-    data: {
-      userId: job.data.userId,
-      jobId,
-      gpuHours,
-      costUSD: jobRecord?.estimatedCost ?? 0,
-    },
-  }).catch((err: unknown) => logger.error({ err, jobId }, 'Failed to create UsageRecord'));
+  // Create UsageRecord
+  const jobRecord = stateStore.getJobById(jobId);
+  await stateStore.recordUsage({
+    userId: job.data.userId,
+    jobId,
+    gpuHours,
+    costUSD: jobRecord?.estimatedCost ?? 0,
+  });
 
   broadcastToJob(jobId, {
     event_type: 'training.completed',
-    jobId,
-    checkpointPath,
-    finalLoss,
+    jobId, checkpointPath, finalLoss,
     totalSteps: finalPoll?.totalSteps ?? 0,
     durationMin,
     costUSD: jobRecord?.estimatedCost ?? 0,
@@ -291,22 +241,16 @@ async function processTrainingJob(job: Job<TrainingJobData>): Promise<void> {
   logger.info({ jobId, checkpointPath, gpuHours }, 'Training job completed');
 }
 
-// ── Failure helper ───────────────────────────────────────────────────────────
-async function markJobFailed(
-  jobId: string,
-  projectId: string,
-  errorMessage: string,
-): Promise<void> {
-  await prisma.job.update({
-    where: { id: jobId },
-    data: { status: 'FAILED', errorMessage, completedAt: new Date() },
-  }).catch((err: unknown) => logger.error({ err, jobId }, 'Failed to mark job FAILED in DB'));
+async function markJobFailed(jobId: string, projectId: string, errorMessage: string): Promise<void> {
+  await stateStore.updateJobStatus(jobId, {
+    status: 'FAILED',
+    errorMessage,
+    completedAt: new Date().toISOString(),
+  });
 
   broadcastToJob(jobId, {
     event_type: 'training.failed',
-    jobId,
-    projectId,
-    error: errorMessage,
+    jobId, projectId, error: errorMessage,
     timestamp: new Date().toISOString(),
   });
 }

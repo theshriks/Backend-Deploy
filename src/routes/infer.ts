@@ -1,18 +1,16 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import rateLimit from 'express-rate-limit';
-import prisma from '../lib/prisma';
-import logger from '../lib/logger';
+import { stateStore } from '../lib/state-store';
+import { logger } from '../lib/logger';
 import type { Request, Response } from 'express';
 
 const router = Router();
 
-// Rate limit by apiKey (per spec §9: "Rate limit per apiKey, not per IP")
 const inferLimiter = rateLimit({
   windowMs: 60 * 1_000,
   limit: 60,
   keyGenerator: (req) => {
-    // Extract apiKey from Authorization: Bearer {apiKey}
     const authHeader = req.headers.authorization;
     if (authHeader?.startsWith('Bearer ')) {
       return authHeader.slice(7);
@@ -21,15 +19,14 @@ const inferLimiter = rateLimit({
   },
   standardHeaders: 'draft-7',
   legacyHeaders: false,
-  validate: false, // Express 5 false-positive on custom keyGenerator
+  validate: false,
   message: { error: 'Rate limit exceeded', code: 'RATE_LIMITED' },
 });
 
-// ── POST /infer/:deploymentId ─────────────────────────────────────────────────
+// ── POST /infer/:deploymentId ─────────────────────────
 router.post('/:deploymentId', inferLimiter, async (req: Request, res: Response): Promise<void> => {
   const deploymentId = req.params['deploymentId'] as string;
 
-  // Extract apiKey from Authorization: Bearer {apiKey}
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'API key required. Use Authorization: Bearer {apiKey}', code: 'UNAUTHORIZED' });
@@ -43,18 +40,11 @@ router.post('/:deploymentId', inferLimiter, async (req: Request, res: Response):
 
   const apiKeyHash = crypto.createHash('sha256').update(rawApiKey).digest('hex');
 
-  const deployment = await prisma.deployment.findUnique({
-    where: { id: deploymentId },
-    include: { model: { select: { id: true, name: true, status: true } } },
-  }).catch((err: unknown) => {
-    logger.error({ err, deploymentId }, 'DB error fetching deployment');
-    return undefined;
-  });
-
-  if (deployment === undefined) { res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }); return; }
+  // O(1) lookup
+  const deployment = stateStore.getDeploymentById(deploymentId);
   if (!deployment) { res.status(404).json({ error: 'Deployment not found', code: 'NOT_FOUND' }); return; }
 
-  // Constant-time comparison — prevents timing attacks
+  // Constant-time comparison
   const hashBuffer = Buffer.from(apiKeyHash);
   const storedBuffer = Buffer.from(deployment.apiKey);
   if (hashBuffer.length !== storedBuffer.length || !crypto.timingSafeEqual(hashBuffer, storedBuffer)) {
@@ -66,6 +56,10 @@ router.post('/:deploymentId', inferLimiter, async (req: Request, res: Response):
     res.status(503).json({ error: 'Deployment is not live', code: 'CONFLICT' });
     return;
   }
+
+  // Get model name for response
+  const model = stateStore.getModelById(deployment.modelId);
+  const modelName = model?.name ?? 'unknown';
 
   const startTime = Date.now();
 
@@ -91,7 +85,7 @@ router.post('/:deploymentId', inferLimiter, async (req: Request, res: Response):
       response: data.response,
       tokensUsed: data.tokensUsed,
       latencyMs,
-      model: deployment.model.name,
+      model: modelName,
     });
   } catch (err) {
     const isTimeout = err instanceof Error && err.name === 'TimeoutError';

@@ -1,15 +1,15 @@
 import 'dotenv/config';
 import http from 'http';
 import app from './app';
-import logger from './lib/logger';
-import prisma from './lib/prisma';
+import { logger } from './lib/logger';
+import { stateStore } from './lib/state-store';
 import redisConnection from './lib/redis';
 import { ensureBuckets } from './lib/minio';
 import { trainingQueue } from './lib/queue';
 import { initShrikDBWebSocket, testEventEmit } from './lib/shrikdb';
 import { startTrainingWorker } from './workers/training.worker';
 
-const PORT = parseInt(process.env.PORT ?? '3000', 10);
+const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
 
 const server = http.createServer(app);
 
@@ -21,14 +21,19 @@ const worker = startTrainingWorker();
 
 // ── Start server ──────────────────────────────────────
 async function main(): Promise<void> {
+  // Replay all events from ShrikDB → populate in-memory state
+  const shrikdbProjectId = process.env['SHRIKDB_PROJECT_ID'] || 'modelforge-prod';
+  await stateStore.initialize(shrikdbProjectId);
+  logger.info('StateStore initialized — event replay complete');
+
   // Ensure MinIO buckets exist before accepting traffic
   await ensureBuckets();
 
   server.listen(PORT, () => {
-    logger.info({ port: PORT, env: process.env.NODE_ENV ?? 'development' }, 'ModelForge backend running');
+    logger.info({ port: PORT, env: process.env['NODE_ENV'] ?? 'development' }, 'ModelForge backend running');
 
     // Run ShrikDB test emit in dev mode only
-    if (process.env.NODE_ENV !== 'production') {
+    if (process.env['NODE_ENV'] !== 'production') {
       testEventEmit().catch(() => null);
     }
   });
@@ -46,13 +51,13 @@ async function shutdown(signal: string): Promise<void> {
   // 1. Stop accepting new connections
   server.close(() => logger.info('HTTP server closed'));
 
-  // 2. Close BullMQ worker (finish current jobs)
+  // 2. Close BullMQ worker
   if (worker) {
     await worker.close().catch((err: unknown) => logger.error({ err }, 'Error closing BullMQ worker'));
     logger.info('BullMQ worker closed');
   }
 
-  // 3. Close BullMQ queue (flush pending operations)
+  // 3. Close BullMQ queue
   if (trainingQueue) {
     await trainingQueue.close().catch((err: unknown) => logger.error({ err }, 'Error closing BullMQ queue'));
     logger.info('BullMQ queue closed');
@@ -64,14 +69,11 @@ async function shutdown(signal: string): Promise<void> {
     logger.info('Redis disconnected');
   }
 
-  // 4. Disconnect Prisma
-  await prisma.$disconnect().catch((err: unknown) => logger.error({ err }, 'Error closing Prisma'));
-  logger.info('Prisma disconnected');
+  // No Prisma to disconnect — ShrikDB is stateless HTTP
 
   process.exit(0);
 }
 
-// Force exit if graceful shutdown takes too long
 function forceExit(signal: string): void {
   void shutdown(signal);
   setTimeout(() => {

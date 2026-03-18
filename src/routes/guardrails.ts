@@ -1,9 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { authenticate } from '../middleware/authenticate';
-import prisma from '../lib/prisma';
-import { Prisma } from '@prisma/client';
-import logger from '../lib/logger';
+import { stateStore } from '../lib/state-store';
+import { logger } from '../lib/logger';
 import type { Request, Response } from 'express';
 
 const router = Router();
@@ -14,8 +13,7 @@ const guardrailBodySchema = z.object({
   rules: z.record(z.string(), z.unknown()),
 });
 
-// ── POST /guardrails ──────────────────────────────────────────────────────────
-// Upsert guardrail config for a model (one per model)
+// ── POST /guardrails ──────────────────────────────────
 router.post('/', async (req: Request, res: Response): Promise<void> => {
   const userId = req.user!.userId;
 
@@ -27,55 +25,47 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 
   const { modelId, rules } = parsed.data;
 
-  // Verify model exists and belongs to user
-  const model = await prisma.model.findUnique({
-    where: { id: modelId },
-    include: { project: { select: { userId: true } } },
-  }).catch((err: unknown) => { logger.error({ err }, 'DB error'); return undefined; });
-
-  if (model === undefined) { res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }); return; }
+  const model = stateStore.getModelById(modelId);
   if (!model) { res.status(404).json({ error: 'Model not found', code: 'NOT_FOUND' }); return; }
-  if (model.project.userId !== userId) { res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' }); return; }
 
-  // Upsert — one guardrail per model (@@unique([modelId]))
-  const guardrail = await prisma.guardrail.upsert({
-    where: { modelId },
-    update: { rules: rules as Prisma.InputJsonValue },
-    create: { modelId, rules: rules as Prisma.InputJsonValue },
-  }).catch((err: unknown) => { logger.error({ err, modelId }, 'DB error upserting guardrail'); return null; });
+  const project = stateStore.getProjectById(model.projectId);
+  if (!project || project.userId !== userId) {
+    res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
+    return;
+  }
 
-  if (!guardrail) { res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }); return; }
+  try {
+    const guardrail = await stateStore.upsertGuardrail({ modelId, rules: rules as Record<string, unknown> });
 
-  logger.info({ userId, modelId, guardrailId: guardrail.id }, 'Guardrail config saved');
-  res.status(200).json({
-    id: guardrail.id,
-    modelId: guardrail.modelId,
-    rules: guardrail.rules,
-    createdAt: guardrail.createdAt,
-    updatedAt: guardrail.updatedAt,
-  });
+    logger.info({ userId, modelId, guardrailId: guardrail.id }, 'Guardrail config saved');
+    res.status(200).json({
+      id: guardrail.id,
+      modelId: guardrail.modelId,
+      rules: guardrail.rules,
+      createdAt: guardrail.createdAt,
+      updatedAt: guardrail.updatedAt,
+    });
+  } catch (err: unknown) {
+    logger.error({ err, modelId }, 'Error upserting guardrail');
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+  }
 });
 
-// ── GET /guardrails/:modelId ──────────────────────────────────────────────────
-router.get('/:modelId', async (req: Request, res: Response): Promise<void> => {
+// ── GET /guardrails/:modelId ──────────────────────────
+router.get('/:modelId', (req: Request, res: Response): void => {
   const userId = req.user!.userId;
   const modelId = req.params['modelId'] as string;
 
-  // Verify model exists and belongs to user
-  const model = await prisma.model.findUnique({
-    where: { id: modelId },
-    include: { project: { select: { userId: true } } },
-  }).catch((err: unknown) => { logger.error({ err }, 'DB error'); return undefined; });
-
-  if (model === undefined) { res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }); return; }
+  const model = stateStore.getModelById(modelId);
   if (!model) { res.status(404).json({ error: 'Model not found', code: 'NOT_FOUND' }); return; }
-  if (model.project.userId !== userId) { res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' }); return; }
 
-  const guardrail = await prisma.guardrail.findUnique({
-    where: { modelId },
-  }).catch((err: unknown) => { logger.error({ err, modelId }, 'DB error'); return undefined; });
+  const project = stateStore.getProjectById(model.projectId);
+  if (!project || project.userId !== userId) {
+    res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
+    return;
+  }
 
-  if (guardrail === undefined) { res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }); return; }
+  const guardrail = stateStore.getGuardrailByModel(modelId);
   if (!guardrail) {
     res.status(404).json({ error: 'No guardrail config found for this model', code: 'NOT_FOUND' });
     return;

@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { authenticate } from '../middleware/authenticate';
-import prisma from '../lib/prisma';
-import logger from '../lib/logger';
+import { stateStore } from '../lib/state-store';
+import { logger } from '../lib/logger';
 import type { Request, Response } from 'express';
 
 const router = Router();
@@ -12,44 +12,32 @@ const createProjectSchema = z.object({
   name: z.string().min(1, 'Project name is required').max(100),
 });
 
-// ── GET /projects ─────────────────────────────────────────────────────────────
+// ── GET /projects ─────────────────────────────────────
 // Response: [{ id, name, createdAt, modelCount, jobCount }]
-router.get('/', async (req: Request, res: Response): Promise<void> => {
+router.get('/', (req: Request, res: Response): void => {
   const userId = req.user!.userId;
 
-  const projects = await prisma.project.findMany({
-    where: { userId },
-    orderBy: { createdAt: 'desc' },
-    select: {
-      id: true,
-      name: true,
-      createdAt: true,
-      _count: {
-        select: { models: true, jobs: true },
-      },
-    },
-  }).catch((err: unknown) => {
-    logger.error({ err, userId }, 'DB error listing projects');
-    return null;
-  });
+  const projects = stateStore.getProjectsByUser(userId);
 
-  if (projects === null) {
-    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
-    return;
-  }
+  // Compute counts from in-memory state
+  const result = projects
+    .map((p) => {
+      const models = stateStore.getModelsByProject(p.id);
+      const jobs = stateStore.getJobsByProject(p.id);
+      return {
+        id: p.id,
+        name: p.name,
+        createdAt: p.createdAt,
+        modelCount: models.length,
+        jobCount: jobs.length,
+      };
+    })
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
-  res.status(200).json(
-    projects.map((p) => ({
-      id: p.id,
-      name: p.name,
-      createdAt: p.createdAt,
-      modelCount: p._count.models,
-      jobCount: p._count.jobs,
-    })),
-  );
+  res.status(200).json(result);
 });
 
-// ── POST /projects ────────────────────────────────────────────────────────────
+// ── POST /projects ────────────────────────────────────
 // Response: { id, name, createdAt }
 router.post('/', async (req: Request, res: Response): Promise<void> => {
   const parsed = createProjectSchema.safeParse(req.body);
@@ -60,21 +48,15 @@ router.post('/', async (req: Request, res: Response): Promise<void> => {
 
   const userId = req.user!.userId;
 
-  const project = await prisma.project.create({
-    data: { name: parsed.data.name, userId },
-    select: { id: true, name: true, createdAt: true },
-  }).catch((err: unknown) => {
-    logger.error({ err, userId }, 'DB error creating project');
-    return null;
-  });
+  try {
+    const project = await stateStore.createProject({ name: parsed.data.name, userId });
 
-  if (!project) {
+    logger.info({ userId, projectId: project.id }, 'Project created');
+    res.status(201).json({ id: project.id, name: project.name, createdAt: project.createdAt });
+  } catch (err: unknown) {
+    logger.error({ err, userId }, 'Error creating project');
     res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
-    return;
   }
-
-  logger.info({ userId, projectId: project.id }, 'Project created');
-  res.status(201).json(project);
 });
 
 export default router;

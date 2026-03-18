@@ -4,14 +4,14 @@ import { Readable } from 'stream';
 import { authenticate } from '../middleware/authenticate';
 import { authorize } from '../middleware/authorize';
 import { BUCKETS, listObjects, getFileStream } from '../lib/minio';
-import prisma from '../lib/prisma';
-import logger from '../lib/logger';
+import { stateStore } from '../lib/state-store';
+import { logger } from '../lib/logger';
 import type { Request, Response } from 'express';
 
 const router = Router();
 router.use(authenticate);
 
-// ── GET /compliance/:modelId/download ─────────────────────────────────────────
+// ── GET /compliance/:modelId/download ─────────────────
 router.get(
   '/:modelId/download',
   authorize('COMPLIANCE', 'EXECUTIVE'),
@@ -19,17 +19,14 @@ router.get(
     const modelId = req.params['modelId'] as string;
     const userId = req.user!.userId;
 
-    const model = await prisma.model.findUnique({
-      where: { id: modelId },
-      include: { project: { select: { userId: true } } },
-    }).catch((err: unknown) => {
-      logger.error({ err, modelId }, 'DB error fetching model for compliance');
-      return undefined;
-    });
-
-    if (model === undefined) { res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }); return; }
+    const model = stateStore.getModelById(modelId);
     if (!model) { res.status(404).json({ error: 'Model not found', code: 'NOT_FOUND' }); return; }
-    if (model.project.userId !== userId) { res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' }); return; }
+
+    const project = stateStore.getProjectById(model.projectId);
+    if (!project || project.userId !== userId) {
+      res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
+      return;
+    }
 
     const prefix = `${modelId}/`;
     let objectList: string[];
@@ -52,11 +49,9 @@ router.get(
     res.setHeader('Content-Disposition', `attachment; filename="compliance-${safeName}-v${model.version}.zip"`);
 
     const archive = archiver('zip', { zlib: { level: 6 } });
-
     archive.on('error', (err) => {
       logger.error({ err, modelId }, 'Archiver error during compliance zip');
     });
-
     archive.pipe(res);
 
     for (const objectName of objectList) {

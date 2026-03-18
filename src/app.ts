@@ -3,7 +3,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import { defaultLimiter } from './middleware/rateLimiter';
 import { errorHandler } from './middleware/errorHandler';
-import logger from './lib/logger';
+import { logger } from './lib/logger';
 
 import authRoutes from './routes/auth';
 import projectRoutes from './routes/projects';
@@ -20,9 +20,9 @@ const app = express();
 // ── Security ──────────────────────────────────────────
 app.use(helmet());
 
-const CORS_ORIGINS = process.env.NODE_ENV === 'production'
+const CORS_ORIGINS = process.env['NODE_ENV'] === 'production'
   ? ['https://theshriks.space', 'https://www.theshriks.space']
-  : true; // dev: allow all origins
+  : true;
 
 app.use(cors({
   origin: CORS_ORIGINS,
