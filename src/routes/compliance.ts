@@ -17,16 +17,12 @@ router.get(
   authorize('COMPLIANCE', 'EXECUTIVE'),
   async (req: Request, res: Response): Promise<void> => {
     const modelId = req.params['modelId'] as string;
-    const userId = req.user!.userId;
 
     const model = stateStore.getModelById(modelId);
     if (!model) { res.status(404).json({ error: 'Model not found', code: 'NOT_FOUND' }); return; }
 
-    const project = stateStore.getProjectById(model.projectId);
-    if (!project || project.userId !== userId) {
-      res.status(403).json({ error: 'Forbidden', code: 'FORBIDDEN' });
-      return;
-    }
+    // COMPLIANCE and EXECUTIVE roles have org-wide read access (authorized above).
+    // No per-user ownership check needed — these roles have broad audit permissions.
 
     const prefix = `${modelId}/`;
     let objectList: string[];
@@ -65,7 +61,7 @@ router.get(
     }
 
     await archive.finalize();
-    logger.info({ userId, modelId, docCount: objectList.length }, 'Compliance ZIP streamed');
+    logger.info({ userId: req.user!.userId, modelId, docCount: objectList.length }, 'Compliance ZIP streamed');
   },
 );
 

@@ -230,7 +230,6 @@ export class ShrikDBClient {
 
   async healthCheck(): Promise<boolean> {
     try {
-      // Attempt a basic request — if server responds, it's alive
       const opts: http.RequestOptions = {
         hostname: this.host,
         port: this.port,
@@ -240,9 +239,20 @@ export class ShrikDBClient {
         timeout: 3000,
       };
 
-      // Send invalid project to test connectivity — we just need a response
-      await httpRequest<unknown>(opts, JSON.stringify({ project_id: '' })).catch(() => {
-        // Even a 500 means the server is alive
+      // Send minimal request to test connectivity
+      // Even a 400/500 response means the server is alive
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(opts, (res) => {
+          res.resume(); // drain response
+          resolve();
+        });
+        req.on('error', (err) => reject(err));
+        req.setTimeout(3000, () => {
+          req.destroy();
+          reject(new Error('healthCheck timeout'));
+        });
+        req.write(JSON.stringify({ project_id: '__health_check__' }));
+        req.end();
       });
       return true;
     } catch {

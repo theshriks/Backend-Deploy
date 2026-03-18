@@ -66,22 +66,46 @@ class StateStore {
   private initialized = false;
   private eventCount = 0;
 
+  private static readonly REPLAY_BATCH_SIZE = 1000;
+
   // ── Initialization ─────────────────────────────────
 
   async initialize(projectId: string): Promise<void> {
     const startTime = Date.now();
 
-    // Try to connect and set credentials, or create project
-    try {
-      const res = await shrikdbClient.createProject(projectId);
-      if (res.success) {
-        logger.info({ projectId }, 'Created new ShrikDB project');
-      }
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Project may already exist — try reading events to verify
-      if (!msg.includes('already exists')) {
-        logger.warn({ err: msg }, 'ShrikDB project creation returned error, attempting to continue');
+    // STRATEGY:
+    // 1. If SHRIKDB_CLIENT_ID + SHRIKDB_CLIENT_KEY are set → use them directly (existing project)
+    // 2. If not → create new project, log credentials for user to save as env vars
+    const envClientId = process.env['SHRIKDB_CLIENT_ID'] ?? '';
+    const envClientKey = process.env['SHRIKDB_CLIENT_KEY'] ?? '';
+
+    if (envClientId && envClientKey) {
+      // Existing project — use saved credentials
+      shrikdbClient.setCredentials(envClientId, envClientKey, projectId);
+      logger.info({ projectId }, 'Using existing ShrikDB credentials from env vars');
+    } else {
+      // New project — create and log credentials
+      try {
+        const res = await shrikdbClient.createProject(projectId);
+        if (res.success) {
+          logger.info({ projectId }, 'Created new ShrikDB project');
+          // IMPORTANT: Log credentials so user can save them as env vars
+          logger.warn({
+            projectId,
+            clientId: res.client_id,
+            clientKey: res.client_key,
+          }, '⚠️  SAVE THESE CREDENTIALS AS ENV VARS: SHRIKDB_CLIENT_ID and SHRIKDB_CLIENT_KEY. Server will need them on next restart.');
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Project may already exist — try to parse credentials from error if possible
+        if (msg.includes('already exists') || msg.includes('409') || msg.includes('400')) {
+          logger.error({ projectId }, 'ShrikDB project already exists but no credentials in env vars. Set SHRIKDB_CLIENT_ID and SHRIKDB_CLIENT_KEY env vars.');
+          throw new Error(
+            `ShrikDB project "${projectId}" already exists. Set SHRIKDB_CLIENT_ID and SHRIKDB_CLIENT_KEY env vars from the initial project creation output.`
+          );
+        }
+        throw new Error(`ShrikDB connection failed: ${msg}`);
       }
     }
 
@@ -89,12 +113,26 @@ class StateStore {
       throw new Error('ShrikDB authentication failed — cannot initialize state store');
     }
 
-    // Replay all events to rebuild state
-    const events = await shrikdbClient.readEvents(0);
-    for (const event of events) {
-      this.applyEvent(event);
+    // Replay all events to rebuild state — PAGINATED to prevent OOM
+    let fromSequence = 0;
+    let totalReplayed = 0;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const events = await shrikdbClient.readEvents(fromSequence, StateStore.REPLAY_BATCH_SIZE);
+      if (events.length === 0) break;
+
+      for (const event of events) {
+        this.applyEvent(event);
+      }
+
+      totalReplayed += events.length;
+      fromSequence = events[events.length - 1].sequence_number + 1;
+
+      if (events.length < StateStore.REPLAY_BATCH_SIZE) break; // Last batch
     }
-    this.eventCount = events.length;
+
+    this.eventCount = totalReplayed;
 
     const elapsed = Date.now() - startTime;
     logger.info({
@@ -578,6 +616,17 @@ class StateStore {
     const ids = this.datasetsByProject.get(projectId);
     if (!ids) return [];
     return Array.from(ids).map((id) => this.datasets.get(id)!).filter(Boolean);
+  }
+
+  async deleteDataset(id: string): Promise<void> {
+    this.ensureInitialized();
+    const dataset = this.datasets.get(id);
+    if (!dataset) {
+      throw Object.assign(new Error('Dataset not found'), { code: 'NOT_FOUND', status: 404 });
+    }
+    const payload: DatasetDeletedPayload = { id };
+    await shrikdbClient.appendEvent(EVENT_TYPES.DATASET_DELETED, payload as unknown as Record<string, unknown>);
+    this.applyDatasetDeleted(payload);
   }
 
   // ── Jobs ───────────────────────────────────────────

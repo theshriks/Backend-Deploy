@@ -17,7 +17,12 @@ const server = http.createServer(app);
 initShrikDBWebSocket(server);
 
 // ── BullMQ Worker ─────────────────────────────────────
-const worker = startTrainingWorker();
+let worker: ReturnType<typeof startTrainingWorker> | null = null;
+try {
+  worker = startTrainingWorker();
+} catch (err) {
+  logger.warn({ err }, 'BullMQ worker failed to start — training jobs will not be processed');
+}
 
 // ── Start server ──────────────────────────────────────
 async function main(): Promise<void> {
@@ -26,8 +31,12 @@ async function main(): Promise<void> {
   await stateStore.initialize(shrikdbProjectId);
   logger.info('StateStore initialized — event replay complete');
 
-  // Ensure MinIO buckets exist before accepting traffic
-  await ensureBuckets();
+  // Ensure MinIO buckets exist before accepting traffic (non-fatal if MinIO is down)
+  try {
+    await ensureBuckets();
+  } catch (err) {
+    logger.warn({ err }, 'MinIO ensureBuckets failed — file operations will fail until MinIO is available');
+  }
 
   server.listen(PORT, () => {
     logger.info({ port: PORT, env: process.env['NODE_ENV'] ?? 'development' }, 'ModelForge backend running');

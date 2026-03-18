@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { authenticate } from '../middleware/authenticate';
 import { uploadLimiter } from '../middleware/rateLimiter';
@@ -105,24 +106,10 @@ router.post('/upload', uploadLimiter, async (req: Request, res: Response): Promi
   const sampleCount = extractSampleCount(req.file.buffer, req.file.mimetype);
   const qualityScore = sampleCount > 0 ? Math.min(100, sampleCount / 10) : 0;
 
-  // Create dataset record first to get ID for MinIO path
-  let dataset;
-  try {
-    dataset = await stateStore.createDataset({
-      projectId,
-      fileName: req.file.originalname,
-      fileType: req.file.mimetype,
-      minioPath: '', // updated after upload
-      sampleCount,
-      qualityScore,
-    });
-  } catch (err: unknown) {
-    logger.error({ err }, 'Error creating dataset record');
-    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
-    return;
-  }
-
-  const minioPath = `${dataset.id}/${req.file.originalname}`;
+  // Generate a stable ID for MinIO path, then upload BEFORE creating the event
+  // This ensures the minioPath in the event (and thus in-memory) is always correct
+  const datasetId = crypto.randomUUID();
+  const minioPath = `${datasetId}/${req.file.originalname}`;
   const fileStream = Readable.from(req.file.buffer);
 
   try {
@@ -134,19 +121,27 @@ router.post('/upload', uploadLimiter, async (req: Request, res: Response): Promi
       { 'Content-Type': req.file.mimetype },
     );
   } catch (err) {
-    logger.error({ err, datasetId: dataset.id }, 'MinIO upload failed');
-    // Note: in event sourcing we can't "delete" the dataset event,
-    // but the minioPath is empty so it's effectively unusable
+    logger.error({ err, datasetId }, 'MinIO upload failed — no dataset record created');
     res.status(500).json({ error: 'File upload failed', code: 'STORAGE_ERROR' });
     return;
   }
 
-  // MinIO path is set as metadata — for event sourcing we record the real path
-  // The dataset was created with empty minioPath; append an update event
-  // For simplicity, the dataset record in memory has the minioPath from creation
-  // We update it in-memory (the event was already recorded with the empty path)
-  // In practice, we should create with the path known upfront
-  // But since we need the ID first, we accept this minor inconsistency
+  // MinIO upload succeeded — now create the dataset record with the real path
+  let dataset;
+  try {
+    dataset = await stateStore.createDataset({
+      projectId,
+      fileName: req.file.originalname,
+      fileType: req.file.mimetype,
+      minioPath,
+      sampleCount,
+      qualityScore,
+    });
+  } catch (err: unknown) {
+    logger.error({ err }, 'Error creating dataset record (MinIO file is orphaned)');
+    res.status(500).json({ error: 'Internal server error', code: 'INTERNAL_ERROR' });
+    return;
+  }
 
   logger.info({ userId, projectId, datasetId: dataset.id, sampleCount }, 'Dataset uploaded');
   res.status(201).json({

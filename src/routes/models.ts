@@ -40,8 +40,9 @@ router.get('/', (req: Request, res: Response): void => {
       benchmarks: m.benchmarks ?? {},
       deployedAt: m.deployedAt,
       status: m.status.toLowerCase(),
+      createdAt: m.createdAt,
     }))
-    .sort((a, b) => new Date(b.deployedAt ?? b.status).getTime() - new Date(a.deployedAt ?? a.status).getTime());
+    .sort((a, b) => new Date(b.deployedAt ?? b.createdAt).getTime() - new Date(a.deployedAt ?? a.createdAt).getTime());
 
   res.status(200).json(models);
 });
