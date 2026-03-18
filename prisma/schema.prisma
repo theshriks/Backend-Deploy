@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── Enums ─────────────────────────────────────────────
+
+enum Role {
+  RESEARCHER
+  SAFETY_ADMIN
+  COMPLIANCE
+  EXECUTIVE
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum ModelStatus {
+  TRAINED
+  EVALUATING
+  EVALUATED
+  DEPLOYING
+  DEPLOYED
+  ARCHIVED
+}
+
+// ── Models ────────────────────────────────────────────
+
+model User {
+  id           String         @id @default(uuid())
+  email        String         @unique
+  name         String
+  passwordHash String
+  role         Role           @default(RESEARCHER)
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+  projects     Project[]
+  refreshTokens RefreshToken[]
+  usageRecords UsageRecord[]
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  used      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([token])
+}
+
+model Project {
+  id        String    @id @default(uuid())
+  name      String
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  datasets  Dataset[]
+  jobs      Job[]
+  models    Model[]
+
+  @@index([userId])
+}
+
+model Dataset {
+  id           String   @id @default(uuid())
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  fileName     String
+  fileType     String
+  minioPath    String
+  sampleCount  Int      @default(0)
+  qualityScore Float    @default(0)
+  createdAt    DateTime @default(now())
+  jobs         Job[]
+
+  @@index([projectId])
+}
+
+model Job {
+  id             String    @id @default(uuid())
+  projectId      String
+  project        Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  datasetId      String
+  dataset        Dataset   @relation(fields: [datasetId], references: [id])
+  modelName      String
+  method         String    @default("finetune")
+  hyperparams    Json      @default("{}")
+  status         JobStatus @default(QUEUED)
+  progress       Float     @default(0)
+  currentLoss    Float?
+  currentStep    Int?
+  totalSteps     Int?
+  eta            String?
+  estimatedCost  Float?
+  actualCost     Float?
+  nemoJobId      String?
+  checkpointPath String?
+  errorMessage   String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  model          Model?
+  usageRecords   UsageRecord[]
+
+  @@index([projectId])
+  @@index([projectId, status])
+  @@index([datasetId])
+  @@index([status])
+  @@index([nemoJobId])
+}
+
+model Model {
+  id             String      @id @default(uuid())
+  projectId      String
+  project        Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  jobId          String      @unique
+  job            Job         @relation(fields: [jobId], references: [id])
+  name           String
+  version        String      @default("1.0.0")
+  parentVersion  String?
+  baseModel      String
+  checkpointPath String?
+  status         ModelStatus @default(TRAINED)
+  benchmarks     Json?
+  deployedAt     DateTime?
+  createdAt      DateTime    @default(now())
+  deployment     Deployment?
+  evalResults    EvalResult[]
+  guardrails     Guardrail[]
+
+  @@index([projectId])
+  @@index([projectId, status])
+}
+
+model Deployment {
+  id           String   @id @default(uuid())
+  modelId      String   @unique
+  model        Model    @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  apiUrl       String
+  apiKey       String
+  nimImagePath String?
+  latencyMs    Float?
+  tokensPerSec Float?
+  status       String   @default("deploying")
+  createdAt    DateTime @default(now())
+}
+
+model EvalResult {
+  id        String   @id @default(uuid())
+  modelId   String
+  model     Model    @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  benchmark String
+  score     Float
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  @@index([modelId])
+  @@index([modelId, benchmark])
+}
+
+model UsageRecord {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobId      String?
+  job        Job?     @relation(fields: [jobId], references: [id])
+  gpuHours   Float    @default(0)
+  costUSD    Float    @default(0)
+  recordedAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Guardrail {
+  id        String   @id @default(cuid())
+  modelId   String
+  model     Model    @relation(fields: [modelId], references: [id], onDelete: Cascade)
+  rules     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([modelId])
+  @@index([modelId])
+  @@map("guardrails")
+}
