@@ -14,6 +14,7 @@ import evalRoutes from './routes/eval';
 import complianceRoutes from './routes/compliance';
 import inferRoutes from './routes/infer';
 import guardrailsRoutes from './routes/guardrails';
+import internalRoutes from './routes/internal';
 
 const app = express();
 
@@ -28,7 +29,7 @@ app.use(cors({
   origin: CORS_ORIGINS,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret'],
 }));
 app.use(defaultLimiter);
 
@@ -57,6 +58,7 @@ app.use('/eval', evalRoutes);
 app.use('/compliance', complianceRoutes);
 app.use('/infer', inferRoutes);
 app.use('/guardrails', guardrailsRoutes);
+app.use('/internal', internalRoutes);
 
 // ── 404 handler ───────────────────────────────────────
 app.use((_req, res) => {
