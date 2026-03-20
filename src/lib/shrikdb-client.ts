@@ -3,6 +3,7 @@
 // Replaces Prisma as the sole persistence layer
 
 import http from 'http';
+import https from 'https';
 import { logger } from './logger';
 
 // ── Response Types ─────────────────────────────────────
@@ -58,10 +59,12 @@ interface ReplayResponse {
 
 function httpRequest<T>(
   options: http.RequestOptions,
-  body?: string
+  body?: string,
+  isHttps: boolean = false
 ): Promise<T> {
   return new Promise((resolve, reject) => {
-    const req = http.request(options, (res) => {
+    const reqFn = isHttps ? https.request : http.request;
+    const req = reqFn(options, (res) => {
       let data = '';
       res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
       res.on('end', () => {
@@ -98,6 +101,7 @@ function httpRequest<T>(
 export class ShrikDBClient {
   private readonly host: string;
   private readonly port: number;
+  private readonly isHttps: boolean;
   private clientId: string | null = null;
   private clientKey: string | null = null;
   private projectId: string | null = null;
@@ -106,7 +110,8 @@ export class ShrikDBClient {
   constructor(url: string = 'http://localhost:8080') {
     const parsed = new URL(url);
     this.host = parsed.hostname;
-    this.port = parseInt(parsed.port, 10) || 8080;
+    this.isHttps = parsed.protocol === 'https:';
+    this.port = parseInt(parsed.port, 10) || (this.isHttps ? 443 : 80);
   }
 
   private getBaseOptions(method: string, path: string): http.RequestOptions {
@@ -134,7 +139,7 @@ export class ShrikDBClient {
     const opts = this.getBaseOptions('POST', '/api/projects');
     const body = JSON.stringify({ project_id: projectId });
 
-    const res = await httpRequest<CreateProjectResponse>(opts, body);
+    const res = await httpRequest<CreateProjectResponse>(opts, body, this.isHttps);
 
     if (res.success) {
       this.clientId = res.client_id;
@@ -178,7 +183,7 @@ export class ShrikDBClient {
       ...(metadata ? { metadata } : {}),
     });
 
-    const res = await httpRequest<AppendEventResponse>(opts, body);
+    const res = await httpRequest<AppendEventResponse>(opts, body, this.isHttps);
 
     if (!res.success) {
       throw new Error(`ShrikDB append failed: ${res.error || 'unknown error'}`);
@@ -199,7 +204,7 @@ export class ShrikDBClient {
     }
 
     const opts = this.getBaseOptions('GET', path);
-    const res = await httpRequest<ReadEventsResponse>(opts);
+    const res = await httpRequest<ReadEventsResponse>(opts, undefined, this.isHttps);
 
     if (!res.success) {
       throw new Error(`ShrikDB read failed: ${res.error || 'unknown error'}`);
@@ -223,7 +228,7 @@ export class ShrikDBClient {
       verify_only: verifyOnly,
     });
 
-    return httpRequest<ReplayResponse>(opts, body);
+    return httpRequest<ReplayResponse>(opts, body, this.isHttps);
   }
 
   // ── Health Check ───────────────────────────────────
@@ -242,7 +247,8 @@ export class ShrikDBClient {
       // Send minimal request to test connectivity
       // Even a 400/500 response means the server is alive
       await new Promise<void>((resolve, reject) => {
-        const req = http.request(opts, (res) => {
+        const reqFn = this.isHttps ? https.request : http.request;
+        const req = reqFn(opts, (res) => {
           res.resume(); // drain response
           resolve();
         });
